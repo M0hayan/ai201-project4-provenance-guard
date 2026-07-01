@@ -1,1 +1,389 @@
-# ai201-project4-provenance-guard
+# Provenance Guard
+
+**Repository:** `ai201-project4-provenance-guard`
+
+Provenance Guard is a Flask-based backend that helps creative platforms provide attribution transparency for text-based submissions. The system analyzes submitted writing using multiple detection signals, produces a confidence score, generates a reader-facing transparency label, records every decision in an audit log, and provides an appeals workflow for creators who believe their work was misclassified.
+
+---
+
+# **Features**
+
+- **POST /submit** endpoint for text attribution analysis
+- **Two independent detection signals**
+  - Groq LLM-based classifier
+  - Stylometric heuristic analysis
+- Combined confidence scoring
+- Three transparency label variants
+- Appeals workflow (`POST /appeal`)
+- Structured audit log
+- Rate limiting using Flask-Limiter
+- Log viewing endpoint (`GET /log`)
+
+---
+
+# **System Architecture**
+
+The submission workflow is:
+
+```
+POST /submit
+        │
+        ▼
+Receive JSON (creator_id + text)
+        │
+        ▼
+Signal 1: Groq LLM Classification
+        │
+        ▼
+Signal 2: Stylometric Analysis
+        │
+        ▼
+Confidence Scoring
+        │
+        ▼
+Transparency Label
+        │
+        ▼
+Audit Log
+        │
+        ▼
+JSON Response
+```
+
+The appeal workflow is:
+
+```
+POST /appeal
+        │
+        ▼
+Lookup content_id
+        │
+        ▼
+Update Status → under_review
+        │
+        ▼
+Append Appeal to Audit Log
+        │
+        ▼
+Return Confirmation
+```
+
+---
+
+# **Detection Signals**
+
+The system intentionally combines two independent signals so that no single method determines the final attribution result.
+
+## **Signal 1 – Groq LLM Classification**
+
+The first signal uses Groq's Llama model to estimate whether submitted writing is more likely human-written or AI-generated.
+
+The model evaluates characteristics such as:
+
+- overall writing style
+- coherence
+- consistency
+- tone
+- wording
+- common AI writing patterns
+
+The output is:
+
+- classification
+- confidence score (0–1)
+- short explanation
+
+### Why this signal?
+
+Large language models are good at recognizing semantic and stylistic patterns that are difficult to capture with simple statistics.
+
+### Blind spots
+
+Because another language model performs the evaluation, it may occasionally misjudge polished human writing or unusually creative AI-generated writing.
+
+---
+
+## **Signal 2 – Stylometric Heuristics**
+
+The second signal measures structural properties of the writing using pure Python.
+
+Metrics include:
+
+- sentence length consistency
+- vocabulary diversity (type-token ratio)
+- presence of common AI transition phrases
+
+These metrics are combined into a stylometric score between 0 and 1.
+
+### Why this signal?
+
+Unlike the LLM, this signal measures objective characteristics of the text rather than meaning. Human writing generally shows greater variation in sentence structure and vocabulary, while AI-generated text often appears more uniform.
+
+### Blind spots
+
+Stylometric analysis cannot understand meaning or author intent.
+
+Formal academic writing, technical documentation, or intentionally repetitive poetry may resemble AI-generated writing even when written entirely by a person.
+
+---
+
+# **Confidence Scoring**
+
+The final confidence score combines both signals.
+
+```
+Combined Score =
+(LLM Score × 0.70) +
+(Stylometric Score × 0.30)
+```
+
+The LLM receives a higher weight because it captures semantic and stylistic information that simple heuristics cannot.
+
+Confidence thresholds are:
+
+| Score | Attribution |
+|--------|-------------|
+| 0.70–1.00 | Likely AI-generated |
+| 0.40–0.69 | Uncertain |
+| 0.00–0.39 | Likely Human-written |
+
+This approach allows the system to express uncertainty rather than forcing every submission into a binary AI/human classification.
+
+If this system were deployed in production, confidence calibration would be improved using a large labeled dataset rather than manually chosen thresholds.
+
+---
+
+# **Confidence Score Examples**
+
+## High-confidence example
+
+```
+Attribution: likely_ai
+
+Confidence: 0.81
+
+LLM Score: 0.92
+
+Stylometric Score: 0.65
+```
+
+The LLM and stylometric analysis both indicated AI-like characteristics, producing a confidence score above the 0.70 threshold.
+
+---
+
+## Lower-confidence example
+
+```
+Attribution: likely_human
+
+Confidence: 0.26
+
+LLM Score: 0.10
+
+Stylometric Score: 0.50
+```
+
+Here, the LLM strongly favored human authorship while the stylometric signal showed mixed evidence. The combined score remained well below the human threshold.
+
+These examples demonstrate that confidence scores vary meaningfully rather than remaining constant.
+
+---
+
+# **Transparency Labels**
+
+The application displays one of three transparency labels.
+
+## **Likely AI-generated**
+
+> **Likely AI-Generated:** This content appears to have been generated by AI. The system has high confidence in this assessment.
+
+---
+
+## **Likely Human-written**
+
+> **Likely Human-Written:** This content appears to have been written by a person. The system has high confidence in this assessment.
+
+---
+
+## **Uncertain**
+
+> **Attribution Uncertain:** The system could not confidently determine whether this content was written by a person or generated by AI.
+
+---
+
+# **Appeals Workflow**
+
+Creators can appeal any attribution decision.
+
+The appeal endpoint accepts:
+
+- content_id
+- creator_reasoning
+
+When an appeal is submitted, the system:
+
+1. Finds the original submission.
+2. Updates its status to **under_review**.
+3. Stores the creator's reasoning.
+4. Adds the appeal information to the audit log.
+
+A human reviewer would see:
+
+- original content ID
+- creator ID
+- original attribution
+- confidence score
+- both detection signal scores
+- creator reasoning
+- timestamps
+- review status
+
+---
+
+# **Rate Limiting**
+
+The `/submit` endpoint uses Flask-Limiter.
+
+Limit:
+
+```
+10 requests per minute; 100 per day per IP
+```
+
+This value allows normal writers to submit multiple pieces while preventing automated abuse that could repeatedly invoke the AI detection pipeline.
+
+---
+429 error message after testing:
+429 Too Many Requests
+Too Many Requests
+10 per 1 minute
+At line:1 char:1
++ Invoke-RestMethod `
++ ~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebException
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand
+
+# **Audit Log**
+
+Every submission creates a structured audit entry.
+
+Example entries:
+
+### Entry 1
+
+```
+content_id: ceca220d...
+creator_id: test-user
+
+attribution: likely_human
+
+confidence: 0.26
+
+llm_score: 0.10
+
+stylometric_score: 0.50
+
+status: under_review
+```
+
+---
+
+### Entry 2
+
+```
+content_id: 3142297d...
+
+attribution: uncertain
+
+confidence: 0.68
+
+llm_score: 0.80
+
+stylometric_score: 0.50
+
+status: classified
+```
+
+---
+
+### Entry 3
+
+```
+content_id: 16db1548...
+
+attribution: likely_ai
+
+confidence: 0.81
+
+llm_score: 0.92
+
+stylometric_score: 0.65
+
+status: classified
+```
+
+The complete audit log can be viewed through:
+
+```
+GET /log
+```
+
+---
+
+# **Known Limitations**
+
+Although combining two signals improves reliability, there are still situations where the system may misclassify content.
+
+### Formal academic writing
+
+Research papers or highly polished essays often resemble AI-generated writing because they use consistent sentence structure and formal transitions. The stylometric heuristics may incorrectly increase the AI score.
+
+### Poetry and experimental writing
+
+Poems frequently use repetition, short sentences, or unusual punctuation. These structural characteristics differ from standard prose and may confuse the stylometric analysis even when the work is entirely human-written.
+
+### Very short submissions
+
+Short text provides little statistical information, making stylometric metrics less reliable. In these cases the LLM carries more influence in the final score.
+
+---
+
+# **Spec Reflection**
+
+The project specification strongly influenced the architecture.
+
+Requiring multiple independent detection signals encouraged separating semantic analysis (LLM) from structural analysis (stylometric heuristics). This made the confidence score more meaningful than relying on either signal alone.
+
+One place where the implementation diverged slightly from the original planning document was the confidence weighting. The original design proposed a 60/40 split, but testing showed the LLM provided more reliable differentiation than the heuristics. The final implementation uses a 70/30 weighting to better reflect each signal's strengths.
+
+---
+
+# **AI Usage**
+
+AI was used as a development assistant throughout the project.
+
+### Example 1
+
+I asked the AI to generate the initial Flask application structure, including the `/submit` endpoint and request validation.
+
+The generated code was then modified to include unique content IDs, audit logging, confidence scoring, and rate limiting that matched my project architecture.
+
+---
+
+### Example 2
+
+I asked the AI to generate the stylometric analysis function and confidence scoring logic.
+
+After testing, I revised the heuristics and confidence weighting because the initial implementation produced nearly identical confidence scores for different inputs. The weighting and heuristics were adjusted until the system produced meaningful variation across AI-generated, human-written, and borderline examples.
+
+---
+
+# **Technologies Used**
+
+- Python
+- Flask
+- Flask-Limiter
+- Groq API (Llama 3.3 70B)
+- JSON audit logging
+- UUID
+- Pure Python stylometric heuristics
